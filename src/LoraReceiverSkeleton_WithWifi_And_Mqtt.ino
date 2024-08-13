@@ -22,6 +22,9 @@ PubSubClient client(espClient);
 #define rst 14
 #define dio0 26
 
+// LED pin
+#define ledPin 25 // You can change this to any available GPIO pin
+
 void setup() {
   Serial.begin(115200);
   while (!Serial);
@@ -52,13 +55,19 @@ void setup() {
     Serial.println("Starting LoRa failed!");
     while (1);
   }
+
+  // Set the same sync word as the sender
+  LoRa.setSyncWord(0xF3);
   Serial.println("LoRa Initializing OK!");
+
+  // Setup LED pin
+  pinMode(ledPin, OUTPUT);
+  digitalWrite(ledPin, LOW); // Ensure the LED is off initially
 }
 
 void loop() {
-
   client.loop();
-  
+
   // Try to parse packet
   int packetSize = LoRa.parsePacket();
   if (packetSize) {
@@ -67,6 +76,20 @@ void loop() {
     while (LoRa.available()) {
       message += (char)LoRa.read();
     }
+
+    // Blink the LED to indicate a message was received
+    digitalWrite(ledPin, HIGH);  // Turn the LED on
+    delay(100);                  // Keep the LED on for 100 milliseconds
+    digitalWrite(ledPin, LOW);   // Turn the LED off
+
+    // Short delay before sending ACK
+    delay(50);
+
+    // Send acknowledgment
+    LoRa.beginPacket();
+    LoRa.print("ACK");
+    LoRa.endPacket();
+    Serial.println("ACK sent");
 
     // Determine topic based on message
     String topic;
