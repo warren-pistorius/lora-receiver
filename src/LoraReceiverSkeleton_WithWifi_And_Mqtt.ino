@@ -23,105 +23,261 @@ PubSubClient client(espClient);
 #define dio0 26
 
 // LED pin
-#define ledPin 25 // You can change this to any available GPIO pin
+#define ledPin 25
+
+// Connection check intervals
+const unsigned long wifiCheckInterval = 30000;  // 30 seconds
+const unsigned long mqttCheckInterval = 60000;  // 60 seconds
+
+unsigned long lastWifiCheck = 0;
+unsigned long lastMqttCheck = 0;
+
+// Message queue
+#define MAX_QUEUE_SIZE 20
+struct QueuedMessage {
+  String topic;
+  String message;
+};
+QueuedMessage messageQueue[MAX_QUEUE_SIZE];
+int queueFront = 0;
+int queueRear = -1;
+int queueSize = 0;
+
+bool serialAvailable = false;
 
 void setup() {
   Serial.begin(115200);
-  while (!Serial);
-  Serial.println("LoRa Receiver");
-
-  // Connect to WiFi
-  WiFi.begin(ssid, password);
-  while (WiFi.status() != WL_CONNECTED) {
-    delay(500);
-    Serial.println("Connecting to WiFi...");
-  }
-  Serial.println("Connected to WiFi");
-
-  // Connect to MQTT broker
-  client.setServer(mqttServer, mqttPort);
-  while (!client.connected()) {
-    Serial.println("Connecting to MQTT...");
-    if (client.connect("LoRaReceiver", mqttUser, mqttPassword)) {
-      Serial.println("Connected to MQTT");
-    } else {
-      delay(500);
-    }
+  unsigned long startTime = millis();
+  while (!Serial && millis() - startTime < 5000);
+  serialAvailable = Serial;  // This will be true if Serial is available, false otherwise
+  
+  if (serialAvailable) {
+    Serial.println("LoRa Receiver");
   }
 
-  // Setup LoRa
-  LoRa.setPins(ss, rst, dio0);
-  if (!LoRa.begin(915E6)) {
-    Serial.println("Starting LoRa failed!");
-    while (1);
-  }
-
-  // Set the same sync word as the sender
-  LoRa.setSyncWord(0xF3);
-  Serial.println("LoRa Initializing OK!");
-
-  // Setup LED pin
   pinMode(ledPin, OUTPUT);
-  digitalWrite(ledPin, LOW); // Ensure the LED is off initially
+
+  setupLoRa();
+  setupWifi();
+  setupMqtt();
+  
 }
 
 void loop() {
+  unsigned long currentMillis = millis();
+
+  // Check WiFi connection
+  if (currentMillis - lastWifiCheck >= wifiCheckInterval) {
+    checkWifiConnection();
+    lastWifiCheck = currentMillis;
+  }
+
+  // Check MQTT connection
+  if (currentMillis - lastMqttCheck >= mqttCheckInterval) {
+    checkMqttConnection();
+    lastMqttCheck = currentMillis;
+  }
+
   client.loop();
 
-  // Try to parse packet
+  // Process queued messages
+  processQueue();
+
+  // LoRa receiving logic
   int packetSize = LoRa.parsePacket();
   if (packetSize) {
-    // Read packet
-    String message = "";
-    while (LoRa.available()) {
-      message += (char)LoRa.read();
+    handleLoRaMessage();
+  }
+}
+
+void setupWifi() {
+  if (serialAvailable) {
+    Serial.println("Connecting to WiFi...");
+  }
+  WiFi.begin(ssid, password);
+  
+  int attempts = 0;
+  while (WiFi.status() != WL_CONNECTED && attempts < 20) {
+    delay(500);
+    if (serialAvailable) {
+      Serial.print(".");
     }
+    attempts++;
+  }
 
-    // Get RSSI value
-    int rssi = LoRa.packetRssi();
+  if (WiFi.status() == WL_CONNECTED) {
+    if (serialAvailable) {
+      Serial.println("\nConnected to WiFi");
+      digitalWrite(ledPin, HIGH);
+    }
+  } else {
+    if (serialAvailable) {
+      Serial.println("\nFailed to connect to WiFi. Will retry later.");
+      Serial.println(WiFi.status());
+    }
+    digitalWrite(ledPin, LOW);
+  }
+}
 
-    // Blink the LED to indicate a message was received
-    digitalWrite(ledPin, HIGH);  // Turn the LED on
-    delay(100);                  // Keep the LED on for 100 milliseconds
-    digitalWrite(ledPin, LOW);   // Turn the LED off
+void checkWifiConnection() {
+  if (WiFi.status() != WL_CONNECTED) {
+    if (serialAvailable) {
+      Serial.println("WiFi connection lost. Reconnecting...");
+    }
+    WiFi.disconnect();
+    setupWifi();
+  }
+}
 
-    // Short delay before sending ACK
-    delay(50);
+void setupMqtt() {
+  client.setServer(mqttServer, mqttPort);
+  connectMqtt();
+}
 
-    // Send acknowledgment
-    LoRa.beginPacket();
-    LoRa.print("ACK");
-    LoRa.endPacket();
+void connectMqtt() {
+  int attempts = 0;
+  while (!client.connected() && attempts < 3) {
+    if (serialAvailable) {
+      Serial.println("Connecting to MQTT...");
+    }
+    if (client.connect("LoRaReceiver", mqttUser, mqttPassword)) {
+      if (serialAvailable) {
+        Serial.println("Connected to MQTT");
+        digitalWrite(ledPin, HIGH);
+      }
+    } else {
+      if (serialAvailable) {
+        Serial.print("Failed to connect to MQTT, rc=");
+        Serial.print(client.state());
+        Serial.println(" Retrying in 5 seconds");
+        digitalWrite(ledPin, LOW);
+      }
+      delay(5000);
+      attempts++;
+    }
+  }
+}
+
+void checkMqttConnection() {
+  if (!client.connected()) {
+    if (serialAvailable) {
+      Serial.println("MQTT connection lost. Reconnecting...");
+    }
+    connectMqtt();
+  }
+}
+
+void setupLoRa() {
+  LoRa.setPins(ss, rst, dio0);
+  LoRa.setTxPower(19);
+  
+  if (!LoRa.begin(915E6)) {
+    if (serialAvailable) {
+      Serial.println("Starting LoRa failed!");
+    }
+    while (1);
+  }
+
+  LoRa.setSyncWord(0xF3);
+  if (serialAvailable) {
+    Serial.println("LoRa Initializing OK!");
+  }
+}
+
+void handleLoRaMessage() {
+  String message = "";
+  while (LoRa.available()) {
+    message += (char)LoRa.read();
+  }
+
+  int rssi = LoRa.packetRssi();
+
+  digitalWrite(ledPin, HIGH);
+  delay(100);
+  digitalWrite(ledPin, LOW);
+  delay(100);
+  digitalWrite(ledPin, HIGH);
+
+  delay(50);
+
+  LoRa.beginPacket();
+  LoRa.print("ACK");
+  LoRa.endPacket();
+  if (serialAvailable) {
     Serial.println("ACK sent");
+  }
 
-    // Send RSSI value to MQTT topic "mailbox/lora-rssi"
-    String rssiStr = String(rssi);
-    if (client.publish("mailbox/lora-rssi", rssiStr.c_str())) {
-      Serial.println("RSSI value published successfully");
-    } else {
-      Serial.println("Failed to publish RSSI value");
-    }
+  publishToMqtt("mailbox/lora-rssi", String(rssi));
 
-    // Determine topic based on message
-    String topic;
-    if (message.startsWith("CHECKIN")) {
-      topic = "mailbox/lora-checkin";
-    } else if (message.startsWith("EVENT")) {
-      topic = "mailbox/lora-event";
-    } else {
-      topic = "mailbox/lora-default";
-    }
+  String topic = "mailbox/lora-default";
+  if (message.startsWith("CHECKIN")) {
+    topic = "mailbox/lora-checkin";
+  } else if (message.startsWith("EVENT")) {
+    topic = "mailbox/lora-event";
+  }
 
-    // Send message to MQTT broker
-    if (client.publish(topic.c_str(), message.c_str())) {
-      Serial.println("Message published successfully");
-    } else {
-      Serial.println("Failed to publish message");
-    }
+  publishToMqtt(topic.c_str(), message);
 
+  if (serialAvailable) {
     Serial.print("Received message: ");
     Serial.println(message);
     Serial.print("RSSI: ");
     Serial.println(rssi);
   }
+}
+
+void publishToMqtt(const char* topic, const String& message) {
+  if (client.connected()) {
+    if (client.publish(topic, message.c_str())) {
+      if (serialAvailable) {
+        Serial.println("Message published successfully");
+      }
+    } else {
+      if (serialAvailable) {
+        Serial.println("Failed to publish message, queueing...");
+      }
+      enqueueMessage(topic, message);
+    }
+  } else {
+    if (serialAvailable) {
+      Serial.println("MQTT not connected. Queueing message.");
+    }
+    enqueueMessage(topic, message);
+  }
+}
+
+void enqueueMessage(const String& topic, const String& message) {
+  if (queueSize < MAX_QUEUE_SIZE) {
+    queueRear = (queueRear + 1) % MAX_QUEUE_SIZE;
+    messageQueue[queueRear].topic = topic;
+    messageQueue[queueRear].message = message;
+    queueSize++;
+    if (serialAvailable) {
+      Serial.println("Message queued successfully");
+    }
+  } else {
+    if (serialAvailable) {
+      Serial.println("Queue is full, message discarded");
+    }
+  }
+}
+
+void processQueue() {
+  if (queueSize > 0 && client.connected()) {
+    if (client.publish(messageQueue[queueFront].topic.c_str(), messageQueue[queueFront].message.c_str())) {
+      if (serialAvailable) {
+        Serial.println("Queued message published successfully");
+      }
+      dequeueMessage();
+    } else {
+      if (serialAvailable) {
+        Serial.println("Failed to publish queued message, will retry later");
+      }
+    }
+  }
+}
+
+void dequeueMessage() {
+  queueFront = (queueFront + 1) % MAX_QUEUE_SIZE;
+  queueSize--;
 }
