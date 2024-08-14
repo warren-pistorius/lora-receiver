@@ -7,7 +7,7 @@
 
 // WiFi credentials
 const char* ssid = "Addie_IoT";
-const char* password = "IOTW@llrus83";
+const char* password = "123";
 
 // MQTT broker details
 const char* mqttServer = "192.168.68.75";
@@ -18,7 +18,7 @@ const int mqttPort = 1883;
 //NTP setup
 const char* ntpServer = "pool.ntp.org";
 const long  gmtOffset_sec = 36000;  // Melbourne is UTC+10 (10 hours * 3600 seconds)
-const int   daylightOffset_sec = 3600;  // 1 hour daylight saving time
+const int   daylightOffset_sec = 0;  // 1 hour daylight saving time
 
 // MQTT client
 WiFiClient espClient;
@@ -342,6 +342,11 @@ void setupTime() {
   setTime(timeinfo.tm_hour, timeinfo.tm_min, timeinfo.tm_sec, timeinfo.tm_mday, timeinfo.tm_mon + 1, timeinfo.tm_year + 1900);
   
   if (serialAvailable) {
-    Serial.println("Time synchronized with NTP server");
+    char timeStr[30];
+    snprintf(timeStr, sizeof(timeStr), "%04d-%02d-%02d %02d:%02d:%02d", 
+             timeinfo.tm_year + 1900, timeinfo.tm_mon + 1, timeinfo.tm_mday, 
+             timeinfo.tm_hour, timeinfo.tm_min, timeinfo.tm_sec);
+    Serial.print("Time synchronized with NTP server: ");
+    Serial.println(timeStr);
   }
 }
