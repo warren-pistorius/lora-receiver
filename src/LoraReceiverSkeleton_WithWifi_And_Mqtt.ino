@@ -2,16 +2,23 @@
 #include <LoRa.h>
 #include <WiFi.h>
 #include <PubSubClient.h>
+#include <time.h>
+#include <TimeLib.h>
 
 // WiFi credentials
 const char* ssid = "Addie_IoT";
-const char* password = "123";
+const char* password = "IOTW@llrus83";
 
 // MQTT broker details
 const char* mqttServer = "192.168.68.75";
 const char* mqttUser = "mqttuser";
 const char* mqttPassword = "mqttpassword";
 const int mqttPort = 1883;
+
+//NTP setup
+const char* ntpServer = "pool.ntp.org";
+const long  gmtOffset_sec = 36000;  // Melbourne is UTC+10 (10 hours * 3600 seconds)
+const int   daylightOffset_sec = 3600;  // 1 hour daylight saving time
 
 // MQTT client
 WiFiClient espClient;
@@ -32,6 +39,11 @@ const unsigned long mqttCheckInterval = 60000;  // 60 seconds
 unsigned long lastWifiCheck = 0;
 unsigned long lastMqttCheck = 0;
 
+unsigned long lastNTPSync = 0;
+const unsigned long ntpSyncInterval = 24 * 60 * 60 * 1000;  // 24 hours
+
+struct tm timeinfo;
+
 // Message queue
 #define MAX_QUEUE_SIZE 20
 struct QueuedMessage {
@@ -44,6 +56,14 @@ int queueRear = -1;
 int queueSize = 0;
 
 bool serialAvailable = false;
+
+
+void checkAndUpdateNTPTime() {
+  if (millis() - lastNTPSync >= ntpSyncInterval) {
+    setupTime();
+    lastNTPSync = millis();
+  }
+}
 
 void setup() {
   Serial.begin(115200);
@@ -59,8 +79,8 @@ void setup() {
 
   setupLoRa();
   setupWifi();
+  setupTime(); 
   setupMqtt();
-  
 }
 
 void loop() {
@@ -79,6 +99,8 @@ void loop() {
   }
 
   client.loop();
+
+  checkAndUpdateNTPTime();
 
   // Process queued messages
   processQueue();
@@ -210,7 +232,22 @@ void handleLoRaMessage() {
   publishToMqtt("mailbox/lora-rssi", String(rssi));
 
   String topic = "mailbox/lora-default";
-  if (message.startsWith("CHECKIN")) {
+
+  if (message == "TIME_REQUEST") {
+    time_t now;
+    
+    if (getLocalTime(&timeinfo)) {
+      char timeStr[25];
+      strftime(timeStr, sizeof(timeStr), "TIME %Y-%m-%d %H:%M:%S", &timeinfo);
+      LoRa.beginPacket();
+      LoRa.print(timeStr);
+      LoRa.endPacket();
+      if (serialAvailable) {
+        Serial.println("Time sent: " + String(timeStr));
+      }
+    }
+  }
+  else if (message.startsWith("CHECKIN")) {
     topic = "mailbox/lora-checkin";
   } else if (message.startsWith("EVENT")) {
     topic = "mailbox/lora-event";
@@ -280,4 +317,31 @@ void processQueue() {
 void dequeueMessage() {
   queueFront = (queueFront + 1) % MAX_QUEUE_SIZE;
   queueSize--;
+}
+
+void setupTime() {
+  configTime(gmtOffset_sec, daylightOffset_sec, ntpServer);
+  
+  int retries = 0;
+  const int maxRetries = 5;
+  while (!getLocalTime(&timeinfo) && retries < maxRetries) {
+    if (serialAvailable) {
+      Serial.println("Failed to obtain time, retrying...");
+    }
+    delay(1000);
+    retries++;
+  }
+  
+  if (retries == maxRetries) {
+    if (serialAvailable) {
+      Serial.println("Failed to synchronize time after multiple attempts");
+    }
+    return;
+  }
+  
+  setTime(timeinfo.tm_hour, timeinfo.tm_min, timeinfo.tm_sec, timeinfo.tm_mday, timeinfo.tm_mon + 1, timeinfo.tm_year + 1900);
+  
+  if (serialAvailable) {
+    Serial.println("Time synchronized with NTP server");
+  }
 }
